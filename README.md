@@ -10,3 +10,4 @@ Analyze the stock trend prediction of 台積電(2330.TW) by constructing an LSTM
 ## Code references
 
 - [@AUSTIN2526](https://github.com/AUSTIN2526/learn-AI-in-30-days-book-version/tree/main)'s Ch.05 LSTM principle introduction and Keras implementation
+- [@Docat0209]LSTM_Stock_Prediction_v1 co-producer

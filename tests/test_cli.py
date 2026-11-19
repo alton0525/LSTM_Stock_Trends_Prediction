@@ -33,7 +33,7 @@ class CliTests(unittest.TestCase):
         with patch("builtins.__import__", side_effect=checked_import), patch.object(
             socket, "socket", side_effect=AssertionError("Unexpected network access")
         ):
-            for command in ([], ["validate-config"], ["download"], ["run"], ["report"]):
+            for command in ([], ["validate-config"], ["download"], ["load-snapshot"], ["run"], ["report"]):
                 with self.subTest(command=command):
                     code, output, _ = self.invoke(command + ["--help"])
                     self.assertEqual(code, 0)
@@ -52,7 +52,7 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("Traceback", error)
 
     def test_unimplemented_commands_are_not_successful(self):
-        for command, option in (("download", "--config"), ("run", "--config"), ("report", "--run-dir")):
+        for command, option in (("run", "--config"), ("report", "--run-dir")):
             with self.subTest(command=command):
                 code, output, error = self.invoke([command, option, "does-not-exist"])
                 self.assertEqual(code, 1)
@@ -60,11 +60,30 @@ class CliTests(unittest.TestCase):
                 self.assertIn("尚未實作", error)
 
     def test_missing_required_arguments_fail(self):
-        for command in ([], ["validate-config"], ["download"], ["run"], ["report"]):
+        for command in ([], ["validate-config"], ["download"], ["load-snapshot"], ["run"], ["report"]):
             with self.subTest(command=command):
                 code, _, error = self.invoke(command)
                 self.assertEqual(code, 2)
                 self.assertIn("required", error)
+
+    def test_download_and_offline_load_validate_configuration(self):
+        for command in ("download", "load-snapshot"):
+            with self.subTest(command=command):
+                code, _, error = self.invoke([command, "--config", str(CONFIG.parent / "missing.json")])
+                self.assertEqual(code, 2)
+                self.assertIn("設定錯誤", error)
+
+    def test_snapshot_errors_do_not_report_success(self):
+        from lstm_comparison.data import SnapshotError
+
+        for command, operation in (("download", "download_snapshot"), ("load-snapshot", "load_snapshot")):
+            with self.subTest(command=command), patch(
+                f"lstm_comparison.data.{operation}", side_effect=SnapshotError("invalid snapshot")
+            ):
+                code, output, error = self.invoke([command, "--config", str(CONFIG)])
+                self.assertEqual(code, 1)
+                self.assertEqual(output, "")
+                self.assertIn("快照錯誤", error)
 
 
 if __name__ == "__main__":

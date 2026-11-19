@@ -86,9 +86,41 @@ groups = build_feature_groups(prices, config)
 
 RSI 的平均跌幅為零、平均漲幅大於零時取 100；平均漲幅為零、平均跌幅大於零時取 0；兩者皆為零時取 50。EMA 初始化與 pandas `ewm(adjust=False)` 預設的第一筆種子不同，本研究固定使用上述 SMA 種子。設定檔限制 MACD 為計畫指定的 12／26／9。
 
-三組輸出保留原始交易日索引、OHLCV 數值與暖機 NaN，不更動輸入、不補值、不刪列、不重建交易日。C 的第 34 筆行情才有全部有效的當日特徵；資料不足時保留對應 NaN。60 日輸入視窗、次日標籤、共同預測日期與縮放由 Commit 4 接續實作。特徵函式檢查日期與價量，但完整交易日及 hash 仍須先由 `load_snapshot` 驗證。
+三組輸出保留原始交易日索引、OHLCV 數值與暖機 NaN，不更動輸入、不補值、不刪列、不重建交易日。C 的第 34 筆行情才有全部有效的當日特徵；資料不足時保留對應 NaN。特徵函式檢查日期與價量，但完整交易日及 hash 仍須先由 `load_snapshot` 驗證。
 
 特徵測試使用離線合成行情，檢查獨立數值案例、暖機界線、漲跌與平盤，以及修改或附加未來行情不影響過去特徵。上述載入範例需要有效快照；正式行情的取得限制見下方「真實來源驗收狀態」。
+
+### 時序資料集與縮放（Commit 4）
+
+`build_dataset(prices, config)` 由原始行情建立三組特徵，選出共同有效樣本，依預測目標日期切分，再進行訓練集專用縮放：
+
+```python
+from lstm_comparison.dataset import build_dataset
+
+dataset = build_dataset(prices, config)
+group = dataset.groups["A"]
+train = group.splits["train"]
+validation = group.splits["validation"]
+test = group.splits["test"]
+original_prices = dataset.y_scaler.inverse_transform(test.y)
+```
+
+以上接續前節的 `load_config`／`load_snapshot` 範例，需要有效快照。`group.columns` 保存欄位順序，`group.x_scaler` 為該組的 X 縮放器；`dataset.y_scaler` 是三組共用的 y 縮放器。每個分區提供：
+
+| 屬性 | 內容與形狀 |
+| --- | --- |
+| `X` | 縮放後 numpy 陣列 `(樣本數, lookback, 特徵數)`；正式 lookback 為 60 |
+| `y` | 縮放後下一交易日 Close，numpy 陣列 `(樣本數, 1)` |
+| `target_dates`／`input_end_dates` | 預測目標日期／最後輸入日期，均為 DatetimeIndex |
+| `y_original`／`previous_close` | 原價口徑的目標 Close／前一交易日 Close，均為 numpy 陣列 `(樣本數, 1)` |
+
+原行情位置 `j` 的目標只使用 `[j-lookback:j]` 輸入，標籤為 `Close[j]`，Naive 及方向評估的基準為 `Close[j-1]`。三組共用相同目標日期與標籤；每個原始連續視窗都必須在所有組具有完整有限值，不先刪除缺值列再拼接歷史。固定設定下 C 有 33 筆暖機，第一個共同樣本使用零起算位置 33–92，預測位置 93，也就是第 94 筆行情；最後一個目標為最後一筆已知行情。
+
+年度分區只看目標日期：2015–2022 年為 train，2023 年為 validation，2024–2025 年為 test。先建立視窗再分區，保留跨年度已知歷史，亦不額外產生週末或休市日。每天使用當時可得的真實歷史行情，沒有將前一天預測值當作後續輸入。
+
+各組 X 的 `MinMaxScaler(feature_range=(0,1), clip=False)` 僅以**共同訓練樣本實際輸入位置的聯集**擬合，每個行情位置只計一次，不包含暖機列或只作為最後訓練標籤的行情列。共用 y 縮放器只以共同訓練目標 Close 擬合。因此 X 與 y 的最值範圍可以不同；驗證與測試不重新擬合，超出訓練範圍時允許值小於 0 或大於 1，反正規化仍能還原原價。縮放器保留在回傳物件中，供後續訓練流程保存。
+
+設定需先由 `load_config` 驗證，保留可配置正整數 lookback 供測試，horizon 固定為 1。無效行情、暖機後沒有共同樣本，或任一分區沒有共同樣本時，明確拋出 `DatasetError`。資料集測試使用離線合成行情驗證索引、跨年、共同日期、縮放 fit 範圍及反正規化；正式資料快照仍受下節記錄的來源問題限制。模型訓練與 CLI `run` 由 Commit 5 接續實作。
 
 ### 行情快照與交易日完整性
 

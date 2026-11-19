@@ -55,6 +55,41 @@ $env:UV_PYTHON_INSTALL_DIR = Join-Path (Get-Location) '.tools/python'
 
 `download` 會下載新行情快照；若快照已存在，會離線檢查並重用，不重新連線或覆寫。`load-snapshot` 僅離線檢查。來源或快照驗證失敗回傳 1，設定錯誤回傳 2。`run --config ...`、`report --run-dir ...` 尚未實作，執行會回傳 1；模型訓練與研究報告依 Commit 5、7 接續完成。
 
+### 三組研究特徵（Commit 3）
+
+`build_feature_groups(frame, config)` 接受 `load_snapshot` 讀回的調整後 OHLCV，以及 `load_config` 驗證後的設定，回傳 `A`、`B`、`C` 三個 DataFrame：
+
+```python
+from lstm_comparison.config import load_config
+from lstm_comparison.data import load_snapshot
+from lstm_comparison.features import build_feature_groups
+
+config = load_config("configs/research.json")
+prices, metadata = load_snapshot(config)
+groups = build_feature_groups(prices, config)
+```
+
+| 組別 | 欄位順序 | 欄數 |
+| --- | --- | --- |
+| A | Close | 1 |
+| B | Open、High、Low、Close、Volume | 5 |
+| C | Open、High、Low、Close、Volume、MA5、MA20、RSI14、MACD、MACD_signal | 10 |
+
+所有指標由調整後 Close 計算，當日特徵只使用當日及以前資料。固定公式及初始化約定如下，暖機筆數指第一筆有效值之前保留的 NaN 筆數：
+
+| 指標 | 公式與初始化 | 暖機筆數 |
+| --- | --- | --- |
+| MA5／MA20 | 包含當日在內的最近 5／20 筆 Close 算術平均；必須有完整視窗 | 4／19 |
+| RSI14 | `gain=max(Close差分,0)`、`loss=max(-Close差分,0)`；以最初 14 個差分的平均漲幅與平均跌幅初始化，之後以 `(13×前值+當期值)/14` 作 Wilder 平滑；`RSI=100-100/(1+平均漲幅/平均跌幅)` | 14 |
+| MACD | `EMA12(Close)-EMA26(Close)`；每個 EMA 以最初 n 筆輸入的 SMA 初始化，再用 `EMA_t=EMA_(t-1)+2/(n+1)×(輸入_t-EMA_(t-1))` 遞推 | 25 |
+| MACD_signal | 對第一筆有效 MACD 起的序列計算 EMA9，同樣以 9 筆 SMA 初始化 | 33 |
+
+RSI 的平均跌幅為零、平均漲幅大於零時取 100；平均漲幅為零、平均跌幅大於零時取 0；兩者皆為零時取 50。EMA 初始化與 pandas `ewm(adjust=False)` 預設的第一筆種子不同，本研究固定使用上述 SMA 種子。設定檔限制 MACD 為計畫指定的 12／26／9。
+
+三組輸出保留原始交易日索引、OHLCV 數值與暖機 NaN，不更動輸入、不補值、不刪列、不重建交易日。C 的第 34 筆行情才有全部有效的當日特徵；資料不足時保留對應 NaN。60 日輸入視窗、次日標籤、共同預測日期與縮放由 Commit 4 接續實作。特徵函式檢查日期與價量，但完整交易日及 hash 仍須先由 `load_snapshot` 驗證。
+
+特徵測試使用離線合成行情，檢查獨立數值案例、暖機界線、漲跌與平盤，以及修改或附加未來行情不影響過去特徵。上述載入範例需要有效快照；正式行情的取得限制見下方「真實來源驗收狀態」。
+
 ### 行情快照與交易日完整性
 
 預設快照由以下三個檔案組成，納入版本控制：

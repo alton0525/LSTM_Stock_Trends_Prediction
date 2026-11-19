@@ -51,13 +51,11 @@ class CliTests(unittest.TestCase):
         self.assertIn("設定錯誤", error)
         self.assertNotIn("Traceback", error)
 
-    def test_unimplemented_commands_are_not_successful(self):
-        for command, option in (("run", "--config"), ("report", "--run-dir")):
-            with self.subTest(command=command):
-                code, output, error = self.invoke([command, option, "does-not-exist"])
-                self.assertEqual(code, 1)
-                self.assertEqual(output, "")
-                self.assertIn("尚未實作", error)
+    def test_unimplemented_report_is_not_successful(self):
+        code, output, error = self.invoke(["report", "--run-dir", "does-not-exist"])
+        self.assertEqual(code, 1)
+        self.assertEqual(output, "")
+        self.assertIn("尚未實作", error)
 
     def test_missing_required_arguments_fail(self):
         for command in ([], ["validate-config"], ["download"], ["load-snapshot"], ["run"], ["report"]):
@@ -67,7 +65,7 @@ class CliTests(unittest.TestCase):
                 self.assertIn("required", error)
 
     def test_download_and_offline_load_validate_configuration(self):
-        for command in ("download", "load-snapshot"):
+        for command in ("download", "load-snapshot", "run"):
             with self.subTest(command=command):
                 code, _, error = self.invoke([command, "--config", str(CONFIG.parent / "missing.json")])
                 self.assertEqual(code, 2)
@@ -84,6 +82,31 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertEqual(output, "")
                 self.assertIn("快照錯誤", error)
+
+    def test_run_dispatches_only_training_stage_and_reports_directory(self):
+        with patch("lstm_comparison.training.run_experiment", return_value=Path("offline-run")) as run:
+            code, output, error = self.invoke(["run", "--config", str(CONFIG)])
+        self.assertEqual(code, 0)
+        self.assertEqual(error, "")
+        self.assertIn("訓練階段完成", output)
+        self.assertIn("offline-run", output)
+        self.assertIn("後續階段", output)
+        self.assertEqual(run.call_args.args[0]["training"]["seeds"], [42, 43, 44])
+
+    def test_run_snapshot_dataset_and_training_errors_return_one(self):
+        from lstm_comparison.data import SnapshotError
+        from lstm_comparison.dataset import DatasetError
+        from lstm_comparison.training import TrainingError
+
+        for error in (SnapshotError("missing snapshot"), DatasetError("no training samples"), TrainingError("fit failed")):
+            with self.subTest(error=type(error).__name__), patch(
+                "lstm_comparison.training.run_experiment", side_effect=error
+            ):
+                code, output, message = self.invoke(["run", "--config", str(CONFIG)])
+                self.assertEqual(code, 1)
+                self.assertEqual(output, "")
+                self.assertIn("訓練錯誤", message)
+                self.assertNotIn("Traceback", message)
 
 
 if __name__ == "__main__":

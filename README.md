@@ -46,6 +46,7 @@ $env:UV_PYTHON_INSTALL_DIR = Join-Path (Get-Location) '.tools/python'
 .\.venv\Scripts\python.exe -m lstm_comparison validate-config --config configs/research.json
 .\.venv\Scripts\python.exe -m lstm_comparison download --config configs/research.json
 .\.venv\Scripts\python.exe -m lstm_comparison load-snapshot --config configs/research.json
+.\.venv\Scripts\python.exe -m lstm_comparison run --config configs/research.json
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
@@ -53,7 +54,7 @@ $env:UV_PYTHON_INSTALL_DIR = Join-Path (Get-Location) '.tools/python'
 
 `validate-config` 成功回傳 exit code 0，無效設定回傳 2。help 與設定檢查只使用 Python 標準庫，不載入 TensorFlow，也不連網。
 
-`download` 會下載新行情快照；若快照已存在，會離線檢查並重用，不重新連線或覆寫。`load-snapshot` 僅離線檢查。來源或快照驗證失敗回傳 1，設定錯誤回傳 2。`run --config ...`、`report --run-dir ...` 尚未實作，執行會回傳 1；模型訓練與研究報告依 Commit 5、7 接續完成。
+`download` 會下載新行情快照；若快照已存在，會離線檢查並重用，不重新連線或覆寫。`load-snapshot` 僅離線檢查。`run` 只讀取既有快照並訓練，不自動下載。來源、快照或訓練失敗回傳 1，設定錯誤回傳 2。`report --run-dir ...` 尚未實作，執行會回傳 1，將於 Commit 7 提供。
 
 ### 三組研究特徵（Commit 3）
 
@@ -120,7 +121,45 @@ original_prices = dataset.y_scaler.inverse_transform(test.y)
 
 各組 X 的 `MinMaxScaler(feature_range=(0,1), clip=False)` 僅以**共同訓練樣本實際輸入位置的聯集**擬合，每個行情位置只計一次，不包含暖機列或只作為最後訓練標籤的行情列。共用 y 縮放器只以共同訓練目標 Close 擬合。因此 X 與 y 的最值範圍可以不同；驗證與測試不重新擬合，超出訓練範圍時允許值小於 0 或大於 1，反正規化仍能還原原價。縮放器保留在回傳物件中，供後續訓練流程保存。
 
-設定需先由 `load_config` 驗證，保留可配置正整數 lookback 供測試，horizon 固定為 1。無效行情、暖機後沒有共同樣本，或任一分區沒有共同樣本時，明確拋出 `DatasetError`。資料集測試使用離線合成行情驗證索引、跨年、共同日期、縮放 fit 範圍及反正規化；正式資料快照仍受下節記錄的來源問題限制。模型訓練與 CLI `run` 由 Commit 5 接續實作。
+設定需先由 `load_config` 驗證，保留可配置正整數 lookback 供測試，horizon 固定為 1。無效行情、暖機後沒有共同樣本，或任一分區沒有共同樣本時，明確拋出 `DatasetError`。資料集測試使用離線合成行情驗證索引、跨年、共同日期、縮放 fit 範圍及反正規化；正式資料快照仍受下節記錄的來源問題限制。
+
+### 共用模型與重複訓練（Commit 5）
+
+`run` 先以 `load_snapshot` 離線檢查快照並建立資料集，通過後才在設定的 `output_dir` 下建立新的唯一實驗目錄；缺少或無效快照不建立實驗目錄。正式設定使用三組各 seeds 42、43、44，共 9 次獨立訓練，不自動下載或修復行情。
+
+```powershell
+# 將 matplotlib 的間接匯入快取放在專案內；不變更全域環境。
+$env:MPLCONFIGDIR = Join-Path (Get-Location) '.tools/matplotlib'
+.\.venv\Scripts\python.exe -m lstm_comparison run --config configs/research.json
+```
+
+三組都使用 `build_model((lookback, 特徵數), config, seed)`：單向 `LSTM(64) → Dense(1)`、Adam learning rate 0.001、MSE。每次清除 Keras 狀態、重設 Python／NumPy／TensorFlow seed，再建立新的模型與 optimizer，固定於 CPU 並啟用 deterministic ops；不同系統與套件版本仍可能有數值差異。輸入為 1／5／10 欄時，預設參數量分別為 16,961／17,985／19,265，會在訓練紀錄保存。
+
+`train_one(group, config, seed, output_dir)` 使用 train 及 validation，每批 32 筆、最多 100 epochs，保持時間順序，`shuffle=False`；透過有限執行緒池的 `tf.data` 順序批次避免多次訓練累積大型執行緒池。早停只監看 `val_loss`，`patience=10`、`restore_best_weights=True`。無論提前停止或跑到最大 epochs，都在還原最佳驗證權重後保存 `best.weights.h5`。不把 test 傳入 fit、用於選權重或挑種子；只額外確認最佳權重的驗證預測為有限值。
+
+每個實驗目錄保存以下產物，目錄名稱包含 UTC 時間與隨機識別碼；再次執行另建目錄，不覆寫既有結果：
+
+```text
+<output_dir>/<run_id>/
+  config.json                 # 已解析的設定
+  snapshot.metadata.json      # 原始快照 metadata，包含行情與交易日 hash
+  environment.json           # Python、系統、套件版本、CPU／deterministic 設定
+  run.json                   # stage=training、狀態、種子與各次訓練摘要
+  scalers/
+    X_A.pkl, X_B.pkl, X_C.pkl, y.pkl
+    description.json         # 欄位順序與訓練最值
+  A/seed_42/
+    best.weights.h5
+    history.csv              # epoch、loss、val_loss
+    training.json            # seed、參數量、最佳 epoch、實際 epochs、時間與狀態
+  ...                        # 其餘組別／種子
+```
+
+縮放器以標準庫 pickle 保存已擬合物件，須在相容環境載入自己的實驗產物。模型權重由既有忽略規則排除，設定、metadata 與精簡文字產物可納入版本控制。重新建立相同形狀的模型後，可使用 `model.load_weights(path, objects_to_skip=[model.optimizer])` 讀回推論權重，`dataset.y_scaler.inverse_transform(...)` 還原價格。載入時略過 optimizer 狀態；最佳模型權重的保存不代表提供中斷續訓。
+
+`run.json` 的 `stage="training", status="completed"` 僅表示全部設定的訓練已完成。任何非有限 loss／驗證預測或保存失敗都回傳錯誤並保留 partial 產物及 `failed` 狀態，供查明原因；不提供自動續跑或覆寫選項。逐日預測 CSV、Naive、績效比較及研究報告由 Commit 6、7 接續實作。
+
+測試用暫存的合成快照離線完成 1／5／10 維短訓練及產物驗證，另外以受控驗證 loss 確認早停與最大 epochs 結束都還原最佳權重，並檢查重新載入權重後預測一致。9 次排程亦有獨立測試。縮短測試 epochs／seeds 的設定與合成行情不代表正式研究完成；正式快照尚未取得，以下來源限制仍適用。
 
 ### 行情快照與交易日完整性
 

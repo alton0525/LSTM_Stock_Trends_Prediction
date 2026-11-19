@@ -10,14 +10,14 @@ from .config import ConfigError, load_config
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="python -m lstm_comparison",
-        description="LSTM 股票價格比較研究；提供設定檢查與行情快照。",
+        description="LSTM 股票價格比較研究；提供設定檢查、行情快照與重複訓練。",
     )
     commands = parser.add_subparsers(dest="command", required=True)
     for name, description in (
         ("validate-config", "檢查 JSON 設定與解析資料路徑，不下載或訓練"),
         ("download", "下載新行情快照，或離線重用既有快照；不覆寫"),
         ("load-snapshot", "離線讀取快照，檢查來源參數、交易日與 SHA256"),
-        ("run", "執行模型比較（Commit 5 尚未實作）"),
+        ("run", "離線驗證既有快照，執行三組模型重複訓練並保存權重與歷程"),
     ):
         command = commands.add_parser(name, help=description, description=description)
         command.add_argument("--config", required=True, help="JSON 設定檔路徑")
@@ -27,7 +27,7 @@ def main(argv=None):
     report.add_argument("--run-dir", required=True, help="實驗目錄")
     args = parser.parse_args(argv)
 
-    if args.command in ("validate-config", "download", "load-snapshot"):
+    if args.command in ("validate-config", "download", "load-snapshot", "run"):
         try:
             config = load_config(args.config)
         except ConfigError as error:
@@ -36,6 +36,19 @@ def main(argv=None):
         if args.command == "validate-config":
             print("設定檢查通過；尚未下載資料或訓練模型。")
             print(json.dumps(config, ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "run":
+            from .data import SnapshotError
+            from .dataset import DatasetError
+            from .training import TrainingError, run_experiment
+
+            try:
+                run_dir = run_experiment(config)
+            except (SnapshotError, DatasetError, TrainingError) as error:
+                print(f"訓練錯誤：{error}", file=sys.stderr)
+                return 1
+            print(f"訓練階段完成：{run_dir}")
+            print("已保存權重與歷程；績效評估與研究報告將於後續階段提供。")
             return 0
         from .data import SnapshotError, download_snapshot, load_snapshot
 
@@ -51,9 +64,8 @@ def main(argv=None):
                          ensure_ascii=False, indent=2))
         return 0
 
-    commit = {"run": 5, "report": 7}[args.command]
     print(
-        f"{args.command} 尚未實作；將於 Commit {commit} 提供，未執行任何研究工作。",
+        "report 尚未實作；將於 Commit 7 提供，未執行任何研究工作。",
         file=sys.stderr,
     )
     return 1

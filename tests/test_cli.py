@@ -33,7 +33,7 @@ class CliTests(unittest.TestCase):
         with patch("builtins.__import__", side_effect=checked_import), patch.object(
             socket, "socket", side_effect=AssertionError("Unexpected network access")
         ):
-            for command in ([], ["validate-config"], ["download"], ["load-snapshot"], ["run"], ["report"]):
+            for command in ([], ["validate-config"], ["download"], ["load-snapshot"], ["run"], ["report"], ["evaluate"]):
                 with self.subTest(command=command):
                     code, output, _ = self.invoke(command + ["--help"])
                     self.assertEqual(code, 0)
@@ -58,7 +58,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("尚未實作", error)
 
     def test_missing_required_arguments_fail(self):
-        for command in ([], ["validate-config"], ["download"], ["load-snapshot"], ["run"], ["report"]):
+        for command in ([], ["validate-config"], ["download"], ["load-snapshot"], ["run"], ["report"], ["evaluate"]):
             with self.subTest(command=command):
                 code, _, error = self.invoke(command)
                 self.assertEqual(code, 2)
@@ -107,6 +107,22 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(output, "")
                 self.assertIn("訓練錯誤", message)
                 self.assertNotIn("Traceback", message)
+
+    def test_evaluate_dispatch_and_failure_code(self):
+        with patch("lstm_comparison.evaluation.evaluate_experiment", return_value=Path("run/evaluation")) as evaluate:
+            code, output, error = self.invoke(["evaluate", "--run-dir", "run"])
+        self.assertEqual(code, 0)
+        self.assertEqual(error, "")
+        self.assertIn("測試集評估完成", output)
+        evaluate.assert_called_once_with("run")
+        from lstm_comparison.evaluation import EvaluationError
+
+        with patch("lstm_comparison.evaluation.evaluate_experiment", side_effect=EvaluationError("bad artifact")):
+            code, output, error = self.invoke(["evaluate", "--run-dir", "run"])
+        self.assertEqual(code, 1)
+        self.assertEqual(output, "")
+        self.assertIn("評估錯誤", error)
+        self.assertNotIn("Traceback", error)
 
 
 if __name__ == "__main__":

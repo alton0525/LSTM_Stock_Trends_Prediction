@@ -54,7 +54,7 @@ $env:UV_PYTHON_INSTALL_DIR = Join-Path (Get-Location) '.tools/python'
 
 `validate-config` 成功回傳 exit code 0，無效設定回傳 2。help 與設定檢查只使用 Python 標準庫，不載入 TensorFlow，也不連網。
 
-`download` 會下載新行情快照；若快照已存在，會離線檢查並重用，不重新連線或覆寫。`load-snapshot` 僅離線檢查。`run` 只讀取既有快照並訓練，不自動下載。來源、快照或訓練失敗回傳 1，設定錯誤回傳 2。`report --run-dir ...` 尚未實作，執行會回傳 1，將於 Commit 7 提供。
+`download` 會下載新行情快照；若快照已存在，會離線檢查並重用，不重新連線或覆寫。`load-snapshot` 僅離線檢查。`run` 只讀取既有快照並訓練，不自動下載；完成後另用 `evaluate --run-dir <實驗目錄>` 評估測試集。來源、快照、訓練或評估失敗回傳 1，`--config` 設定錯誤回傳 2。`report --run-dir ...` 尚未實作，執行會回傳 1，將於 Commit 7 提供。
 
 ### 三組研究特徵（Commit 3）
 
@@ -157,9 +157,50 @@ $env:MPLCONFIGDIR = Join-Path (Get-Location) '.tools/matplotlib'
 
 縮放器以標準庫 pickle 保存已擬合物件，須在相容環境載入自己的實驗產物。模型權重由既有忽略規則排除，設定、metadata 與精簡文字產物可納入版本控制。重新建立相同形狀的模型後，可使用 `model.load_weights(path, objects_to_skip=[model.optimizer])` 讀回推論權重，`dataset.y_scaler.inverse_transform(...)` 還原價格。載入時略過 optimizer 狀態；最佳模型權重的保存不代表提供中斷續訓。
 
-`run.json` 的 `stage="training", status="completed"` 僅表示全部設定的訓練已完成。任何非有限 loss／驗證預測或保存失敗都回傳錯誤並保留 partial 產物及 `failed` 狀態，供查明原因；不提供自動續跑或覆寫選項。逐日預測 CSV、Naive、績效比較及研究報告由 Commit 6、7 接續實作。
+`run.json` 的 `stage="training", status="completed"` 僅表示全部設定的訓練已完成。任何非有限 loss／驗證預測或保存失敗都回傳錯誤並保留 partial 產物及 `failed` 狀態，供查明原因；不提供自動續跑或覆寫選項。逐日預測、Naive 及績效由下節的獨立評估指令產生，研究報告由 Commit 7 接續實作。
 
 測試用暫存的合成快照離線完成 1／5／10 維短訓練及產物驗證，另外以受控驗證 loss 確認早停與最大 epochs 結束都還原最佳權重，並檢查重新載入權重後預測一致。9 次排程亦有獨立測試。縮短測試 epochs／seeds 的設定與合成行情不代表正式研究完成；正式快照尚未取得，以下來源限制仍適用。
+
+### 測試集預測與績效比較（Commit 6）
+
+對 `run` 回傳的既有訓練目錄執行以下指令；角括號需換成實際路徑。`run` 維持只訓練，`evaluate` 不重新訓練、不下載，也不以測試績效選種子：
+
+```powershell
+$env:MPLCONFIGDIR = Join-Path (Get-Location) '.tools/matplotlib'
+.\.venv\Scripts\python.exe -m lstm_comparison evaluate --run-dir <實驗目錄>
+```
+
+亦可呼叫 `evaluate_experiment(run_dir)`，回傳 `<實驗目錄>/evaluation`。評估先檢查完整的 A／B／C × 設定種子清單、各子訓練完成狀態、欄序、參數量、權重及歷程檔；目前行情與交易日 hash 必須符合訓練保存的 metadata。載回 pickle 的 X／y 縮放器，檢查欄數、訓練最值、縮放設定與保存描述後，只做 transform，不重新 fit。
+
+資料集 API `build_dataset(prices, config, x_scalers=..., y_scaler=...)` 支援這條載回路徑；X 字典必須包含三組且與 y 縮放器一起提供。省略兩者時維持訓練專用 fit 的原行為。包含 `copy=False` 的合法縮放器也使用獨立輸入副本，保留原行情及原價標籤。
+
+只對 **test 分區**載回各種子的最佳權重，維持原順序分批推論，再以保存的 y 縮放器反正規化。三組所有種子與 Naive 共用完全相同的目標日期、原價真值與前一交易日 Close；這兩種真值直接取自原始行情，沒有以反縮放近似值代替。Naive 的逐日預測固定等於該目標之前一交易日 Close，只保存一份。
+
+| 指標 | 公式及口徑 |
+| --- | --- |
+| MAE | `mean(abs(predicted_close-actual_close))`，主要比較指標，單位為調整後價格 |
+| RMSE | `sqrt(mean((predicted_close-actual_close)^2))`，單位為調整後價格 |
+| directional_accuracy | 比較 `sign(predicted_close-previous_close)` 與 `sign(actual_close-previous_close)`，保存 0–1 比例 |
+| 誤差改善率 | `100×(Naive誤差-模型誤差)/Naive誤差`，分別計算 MAE／RMSE，單位為百分比；負值表示變差 |
+
+方向明確分成 -1／0／1（下跌／持平／上漲），不加 epsilon 門檻；Naive 的預測變動雖固定為零，方向正確率仍依研究設計標示 N/A。每個種子保留績效，再按組別彙整算術平均與樣本標準差（`ddof=1`）。只有一個種子時標準差為 N/A；Naive 誤差為零時對應改善率為 N/A。Naive 彙總列的 `n_seeds=0`，不虛構重複實驗；沒有挑最佳種子或合成 ensemble。
+
+```text
+<實驗目錄>/evaluation/
+  predictions_A_seed_42.csv   # 各組／種子分開保存
+  ...
+  predictions_naive.csv       # 共用一份
+  metrics_per_seed.csv        # 各種子及 Naive 績效
+  metrics_summary.csv         # 三組平均、樣本標準差、改善率及 Naive 列
+  environment.json
+  evaluation.json            # 獨立狀態、資料／設定／權重／縮放器 hash、樣本期間與績效
+```
+
+逐日 CSV 欄位為 `target_date,input_end_date,group,seed,actual_close,previous_close,predicted_close,absolute_error,squared_error,actual_direction,predicted_direction,direction_correct`，可直接重算績效。Naive 的 `seed` 與 `direction_correct` 為 N/A，`predicted_direction=0`。每種子表含 `mae,rmse,directional_accuracy` 及兩種誤差改善率；彙總欄位以 `_mean`／`_std` 標示。CSV 的未定義值寫成 `N/A`，JSON 寫成 `null`，不保存 NaN／Infinity。
+
+輸入驗證通過後才建立固定 `evaluation/`，既有評估目錄一律拒絕覆寫。評估狀態獨立於訓練的 `run.json`；推論、輸出或有限數值檢查失敗會保留 partial 產物並標記 `failed`，不改寫原訓練狀態。逐日平方誤差超出浮點表示範圍也會明確失敗。成功僅代表指定訓練目錄的測試集評估完成，圖表與中文報告仍由 Commit 7 提供。
+
+離線測試包含手算績效、三分類與持平、9 次評估排程、CSV 績效獨立重算、來源／權重／縮放器錯誤及失敗狀態；另以合成快照完成 A／B／C seed42 短訓練後，重新載入真實權重及縮放器評估。這些測試不代表正式 9 次研究已完成；正式 Yahoo 快照仍受下節限制。
 
 ### 行情快照與交易日完整性
 

@@ -25,7 +25,21 @@ def main(argv=None):
         "report", help="產生研究報告（Commit 7 尚未實作）"
     )
     report.add_argument("--run-dir", required=True, help="實驗目錄")
+    evaluate = commands.add_parser("evaluate", help="載回已完成訓練，離線評估共同測試日期與 Naive")
+    evaluate.add_argument("--run-dir", required=True, help="已完成的訓練實驗目錄")
     args = parser.parse_args(argv)
+
+    if args.command == "evaluate":
+        from .evaluation import EvaluationError, evaluate_experiment
+
+        try:
+            output = evaluate_experiment(args.run_dir)
+        except EvaluationError as error:
+            print(f"評估錯誤：{error}", file=sys.stderr)
+            return 1
+        print(f"測試集評估完成：{output}")
+        print("已保存逐日預測與績效表；圖表與研究報告將於 Commit 7 提供。")
+        return 0
 
     if args.command in ("validate-config", "download", "load-snapshot", "run"):
         try:
@@ -48,7 +62,7 @@ def main(argv=None):
                 print(f"訓練錯誤：{error}", file=sys.stderr)
                 return 1
             print(f"訓練階段完成：{run_dir}")
-            print("已保存權重與歷程；績效評估與研究報告將於後續階段提供。")
+            print("已保存權重與歷程；可使用 evaluate --run-dir 評估，圖表與研究報告將於後續階段提供。")
             return 0
         from .data import SnapshotError, download_snapshot, load_snapshot
 

@@ -228,6 +228,54 @@ class DatasetTests(unittest.TestCase):
             with self.subTest(sequence=invalid["sequence"]), self.assertRaises(DatasetError):
                 self.build(config=invalid)
 
+    def test_persisted_scalers_are_transform_only_and_match_default_dataset(self):
+        original = self.build()
+        x_scalers = {name: group.x_scaler for name, group in original.groups.items()}
+        with patch("sklearn.preprocessing.MinMaxScaler.fit", side_effect=AssertionError("Unexpected fit")):
+            restored = build_dataset(self.frame, self.config, x_scalers=x_scalers, y_scaler=original.y_scaler)
+        self.assertIs(restored.y_scaler, original.y_scaler)
+        for name, group in restored.groups.items():
+            self.assertIs(group.x_scaler, original.groups[name].x_scaler)
+            for split_name, split in group.splits.items():
+                expected = original.groups[name].splits[split_name]
+                np.testing.assert_array_equal(split.X, expected.X)
+                np.testing.assert_array_equal(split.y, expected.y)
+                pd.testing.assert_index_equal(split.target_dates, expected.target_dates)
+
+    def test_persisted_scalers_reject_missing_groups_wrong_ranges_and_settings(self):
+        dataset = self.build()
+        scalers = {name: group.x_scaler for name, group in dataset.groups.items()}
+        cases = [(None, dataset.y_scaler), (scalers, None), ({"A": scalers["A"]}, dataset.y_scaler)]
+        for attribute, value in (("clip", True), ("n_features_in_", 99),
+                                 ("data_min_", np.array([-999.])), ("scale_", np.array([999.]))):
+            changed = copy.deepcopy(scalers)
+            setattr(changed["A"], attribute, value)
+            cases.append((changed, dataset.y_scaler))
+        invalid_y = copy.deepcopy(dataset.y_scaler)
+        invalid_y.data_max_ = np.array([9999.])
+        cases.append((scalers, invalid_y))
+        for x_scalers, y_scaler in cases:
+            with self.subTest(x_type=type(x_scalers).__name__), self.assertRaises(DatasetError):
+                build_dataset(self.frame, self.config, x_scalers=x_scalers, y_scaler=y_scaler)
+
+    def test_persisted_copy_false_scalers_preserve_original_prices_and_windows(self):
+        expected = self.build()
+        original = self.frame.copy(deep=True)
+        x_scalers = {name: copy.deepcopy(group.x_scaler) for name, group in expected.groups.items()}
+        y_scaler = copy.deepcopy(expected.y_scaler)
+        for scaler in (*x_scalers.values(), y_scaler):
+            scaler.copy = False
+        with patch("sklearn.preprocessing.MinMaxScaler.fit", side_effect=AssertionError("Unexpected fit")):
+            actual = build_dataset(self.frame, self.config, x_scalers=x_scalers, y_scaler=y_scaler)
+        pd.testing.assert_frame_equal(self.frame, original)
+        for name, group in actual.groups.items():
+            for split_name, split in group.splits.items():
+                wanted = expected.groups[name].splits[split_name]
+                np.testing.assert_array_equal(split.X, wanted.X)
+                np.testing.assert_array_equal(split.y, wanted.y)
+                np.testing.assert_array_equal(split.y_original, wanted.y_original)
+                np.testing.assert_array_equal(split.previous_close, wanted.previous_close)
+
 
 if __name__ == "__main__":
     unittest.main()

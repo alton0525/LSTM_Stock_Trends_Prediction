@@ -54,7 +54,7 @@ $env:UV_PYTHON_INSTALL_DIR = Join-Path (Get-Location) '.tools/python'
 
 `validate-config` 成功回傳 exit code 0，無效設定回傳 2。help 與設定檢查只使用 Python 標準庫，不載入 TensorFlow，也不連網。
 
-`download` 會下載新行情快照；若快照已存在，會離線檢查並重用，不重新連線或覆寫。`load-snapshot` 僅離線檢查。`run` 只讀取既有快照並訓練，不自動下載；完成後另用 `evaluate --run-dir <實驗目錄>` 評估測試集。來源、快照、訓練或評估失敗回傳 1，`--config` 設定錯誤回傳 2。`report --run-dir ...` 尚未實作，執行會回傳 1，將於 Commit 7 提供。
+`download` 會下載新行情快照；若快照已存在，會離線檢查並重用，不重新連線或覆寫。`load-snapshot` 僅離線檢查。`run` 只讀取既有快照並訓練，不自動下載；完成後另用 `evaluate --run-dir <實驗目錄>` 評估測試集，再用 `report --run-dir <實驗目錄>` 產生圖表與中文報告。來源、快照、訓練、評估或報告失敗回傳 1，`--config` 設定錯誤回傳 2。
 
 ### 三組研究特徵（Commit 3）
 
@@ -157,7 +157,7 @@ $env:MPLCONFIGDIR = Join-Path (Get-Location) '.tools/matplotlib'
 
 縮放器以標準庫 pickle 保存已擬合物件，須在相容環境載入自己的實驗產物。模型權重由既有忽略規則排除，設定、metadata 與精簡文字產物可納入版本控制。重新建立相同形狀的模型後，可使用 `model.load_weights(path, objects_to_skip=[model.optimizer])` 讀回推論權重，`dataset.y_scaler.inverse_transform(...)` 還原價格。載入時略過 optimizer 狀態；最佳模型權重的保存不代表提供中斷續訓。
 
-`run.json` 的 `stage="training", status="completed"` 僅表示全部設定的訓練已完成。任何非有限 loss／驗證預測或保存失敗都回傳錯誤並保留 partial 產物及 `failed` 狀態，供查明原因；不提供自動續跑或覆寫選項。逐日預測、Naive 及績效由下節的獨立評估指令產生，研究報告由 Commit 7 接續實作。
+`run.json` 的 `stage="training", status="completed"` 僅表示全部設定的訓練已完成。任何非有限 loss／驗證預測或保存失敗都回傳錯誤並保留 partial 產物及 `failed` 狀態，供查明原因；不提供自動續跑或覆寫選項。逐日預測、Naive 及績效由獨立評估指令產生，圖表與中文報告再由 `report` 整理保存產物。
 
 測試用暫存的合成快照離線完成 1／5／10 維短訓練及產物驗證，另外以受控驗證 loss 確認早停與最大 epochs 結束都還原最佳權重，並檢查重新載入權重後預測一致。9 次排程亦有獨立測試。縮短測試 epochs／seeds 的設定與合成行情不代表正式研究完成；正式快照尚未取得，以下來源限制仍適用。
 
@@ -198,9 +198,50 @@ $env:MPLCONFIGDIR = Join-Path (Get-Location) '.tools/matplotlib'
 
 逐日 CSV 欄位為 `target_date,input_end_date,group,seed,actual_close,previous_close,predicted_close,absolute_error,squared_error,actual_direction,predicted_direction,direction_correct`，可直接重算績效。Naive 的 `seed` 與 `direction_correct` 為 N/A，`predicted_direction=0`。每種子表含 `mae,rmse,directional_accuracy` 及兩種誤差改善率；彙總欄位以 `_mean`／`_std` 標示。CSV 的未定義值寫成 `N/A`，JSON 寫成 `null`，不保存 NaN／Infinity。
 
-輸入驗證通過後才建立固定 `evaluation/`，既有評估目錄一律拒絕覆寫。評估狀態獨立於訓練的 `run.json`；推論、輸出或有限數值檢查失敗會保留 partial 產物並標記 `failed`，不改寫原訓練狀態。逐日平方誤差超出浮點表示範圍也會明確失敗。成功僅代表指定訓練目錄的測試集評估完成，圖表與中文報告仍由 Commit 7 提供。
+輸入驗證通過後才建立固定 `evaluation/`，既有評估目錄一律拒絕覆寫。評估狀態獨立於訓練的 `run.json`；推論、輸出或有限數值檢查失敗會保留 partial 產物並標記 `failed`，不改寫原訓練狀態。逐日平方誤差超出浮點表示範圍也會明確失敗。成功僅代表指定訓練目錄的測試集評估完成，圖表與中文報告另由以下 `report` 指令產生。
 
 離線測試包含手算績效、三分類與持平、9 次評估排程、CSV 績效獨立重算、來源／權重／縮放器錯誤及失敗狀態；另以合成快照完成 A／B／C seed42 短訓練後，重新載入真實權重及縮放器評估。這些測試不代表正式 9 次研究已完成；正式 Yahoo 快照仍受下節限制。
+
+### 研究圖表與中文報告（Commit 7）
+
+對同一個已完成訓練與評估的實驗目錄執行：
+
+```powershell
+$env:MPLCONFIGDIR = Join-Path (Get-Location) '.tools/matplotlib'
+.\.venv\Scripts\python.exe -m lstm_comparison report --run-dir <實驗目錄>
+```
+
+`generate_report(run_dir)` 只讀保存的設定、來源 metadata、訓練歷程與評估 CSV／JSON，回傳 `<實驗目錄>/report`。不載入 TensorFlow、不讀 pickle、不重訓、不重新預測或下載；即使原始快照、權重與縮放器已搬離原路徑，也可由保存結果產報。來源權重／縮放器的 hash 沿用評估紀錄作追溯，不假裝本步驟重新驗證了缺少的原檔。
+
+產報前檢查訓練與評估完成狀態、確切組別／種子、設定／行情／交易日 hash 與來源參數，再從逐日價格重算誤差、方向、每種子及彙總指標，核對 CSV 與 evaluation manifest。所有模型與 Naive 的日期、原價真值與前收盤須完全對齊；已知相鄰交易日的前收盤也須等於上一筆真值。訓練歷程須為連續 epoch 1…n、有限非負 loss，實際 epochs、最佳 epoch／val_loss 必須與兩份訓練紀錄一致。缺檔、篡改或矛盾資料會在建立報告目錄前明確失敗。
+
+```text
+<實驗目錄>/report/
+  report.md                  # 中文實驗報告，八個章節
+  report.json                # 狀態、環境、所有報告輸入／輸出 hash、原預測來源 hash
+  figures/
+    prices.png
+    errors.png
+    direction.png
+    loss.png
+```
+
+圖表採 matplotlib 的離線 Agg 輸出 PNG，不開視窗；圖中用清楚的日期、單位、種子與英文軸標，中文內容置於 Markdown 報告：
+
+| 圖檔 | 呈現規則 |
+| --- | --- |
+| `prices.png` | 實際價格、三組 **seed 42** 預測及 Naive；固定42，不挑最佳、不合成ensemble |
+| `errors.png` | 全部設定種子的 MAE／RMSE 平均與樣本std，Naive為單份基準；單seed不假造0 std |
+| `direction.png` | 全部設定種子的方向正確率平均與樣本std，以百分比顯示；Naive只標N/A，不畫0%柱 |
+| `loss.png` | A／B／C三個面板，全部設定seed的train／val loss，單位為縮放後Close的MSE |
+
+若 `evaluation.plot_seed` 不是42或實驗沒有42，會拒絕產報，避免以其他種子替代。台積電 `2330.TW` 的價格標TWD；其他ticker使用來源metadata幣別，缺少幣別時用中性 `source price unit`，不套用TWD。
+
+報告依序包含實驗概況、資料與方法、模型與實際訓練設定、逐seed／彙總績效、四圖、RQ1單變量對OHLCV／RQ2技術指標影響／RQ3與Naive比較、限制、重現及來源。結果文字由本次MAE及逐seed比較產生，同時列出RMSE與方向，不預設多變量勝出；平手、變差、負改善率與種子不一致都會保留。單seed樣本std、零Naive誤差的改善率與Naive方向仍顯示N/A。
+
+限制包括單股／固定期間、未觀測因素與突發事件、來源資料品質與修訂、有限種子、模型參數量差異；不宣稱統計顯著、普遍因果或交易報酬。報告明示本次實際日期、epochs與seeds，短測試／非預設設定不能冒充正式研究；任何情況都不自動宣告Commit8已完成。
+
+固定 `report/` 一律拒絕覆寫；輸出失敗保留partial及`failed`狀態，原訓練與評估紀錄不變。`report.json` 的`stage="report",status="completed"`只代表這次報告生成成功。離線測試含勝負／平手／種子不一致、單seed／零基準、來源矛盾與篡改、固定42、圖片／相對連結／hash，以及移除原行情與模型檔且禁止推論／fit／下載後仍可生成；另已實際檢視四張合成示範圖。正式資料與9次訓練仍須在來源問題解決後依Commit8執行。
 
 ### 行情快照與交易日完整性
 

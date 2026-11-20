@@ -51,11 +51,12 @@ class CliTests(unittest.TestCase):
         self.assertIn("設定錯誤", error)
         self.assertNotIn("Traceback", error)
 
-    def test_unimplemented_report_is_not_successful(self):
+    def test_missing_report_input_is_not_successful(self):
         code, output, error = self.invoke(["report", "--run-dir", "does-not-exist"])
         self.assertEqual(code, 1)
         self.assertEqual(output, "")
-        self.assertIn("尚未實作", error)
+        self.assertIn("報告錯誤", error)
+        self.assertNotIn("Traceback", error)
 
     def test_missing_required_arguments_fail(self):
         for command in ([], ["validate-config"], ["download"], ["load-snapshot"], ["run"], ["report"], ["evaluate"]):
@@ -123,6 +124,15 @@ class CliTests(unittest.TestCase):
         self.assertEqual(output, "")
         self.assertIn("評估錯誤", error)
         self.assertNotIn("Traceback", error)
+
+    def test_report_dispatches_saved_artifacts_and_reports_only_generation(self):
+        with patch("lstm_comparison.report.generate_report", return_value=Path("run/report")) as report:
+            code, output, error = self.invoke(["report", "--run-dir", "run"])
+        report.assert_called_once_with("run")
+        self.assertEqual(code, 0)
+        self.assertEqual(error, "")
+        self.assertIn("圖表與實驗報告已產生", output)
+        self.assertIn("不代表 Commit 8", output)
 
 
 if __name__ == "__main__":
